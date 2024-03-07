@@ -1,8 +1,7 @@
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
-#include <ESP8266HTTPClient.h>
+#include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-
 #include <floatToString.h>
 #include <TinyGPSPlus.h>
 #include <SoftwareSerial.h>
@@ -15,67 +14,48 @@
 
 #define WIFI_SSID "Sanju's iPhone"
 #define WIFI_PASSWORD "12345678"
+#define WIFI_ATTEMPT_COUNT 10
+#define REQUEST_WAIT_TIME 3000
 
 static const int RXPin = D8, TXPin = D7;
 static const uint32_t GPSBaud = 9600;
 
-const byte ROWS = 4;
-const byte COLS = 4;
-
-String LAT, LON;
-
-char keys[ROWS][COLS] = {
-  { 'D', 'C', 'B', 'A' },
-  { '#', '9', '6', '3' },
-  { '0', '8', '5', '2' },
-  { '*', '7', '4', '1' }
-};
-
-const char* keyMap[10] = {
-  " _0",
-  "ABC1",
-  "DEF2",
-  "GHI3",
-  "JKL4",
-  "MNO5",
-  "PQR6",
-  "STU7",
-  "VWX8",
-  "YZ.9",
-};
-
-byte rowPins[ROWS] = { 16, 0, 2, 14 };  //Keypad pins
-byte colPins[COLS] = { 12, 3, 10, 9 };
-
-Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 WiFiClient wifiClient;
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 TinyGPSPlus gps;
 SoftwareSerial ss(RXPin, TXPin);
+StaticJsonDocument<1024> doc;
 
-bool wifiConnected = false;
-bool setupCompleted = false;
-bool transmitStarted = false;
-bool gpsConnected = false;
-bool manualWifi = false;
+WebSocketsClient webSocket;
+
+enum SystemState {
+  STATE_CONNECTING_WIFI,
+  STATE_CONNECED_WIFI,
+  STATE_NO_WIFI,
+  STATE_NO_GPS,
+  STATE_SETUP,
+  STATE_SETUP_COMPLETED,
+  STATE_TRANSMITTING,
+  STATE_IDLE
+};
+
+SystemState currentState = STATE_CONNECTING_WIFI;
 
 void setup() {
   Serial.begin(9600);
   ss.begin(GPSBaud);
-  init_lcd();
+  initLCD();
 
-  connect_to_wifi();
+  currentState = connectToWIFI();
 
   lcd.clear();
   delay(1000);
 
-  gpsConnected = true;
+  webSocket.begin("172.20.10.5", 5000, "/");
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(5000);
 }
 
-unsigned long lastKeyPressTime = 0;
-char currentKey = '\0';
-int charIndex = 0;
-String currentWord = "";
 
 String line_0 = "";
 String line_1 = "";
@@ -83,114 +63,132 @@ String line_1 = "";
 String p_line_0 = line_0;
 String p_line_1 = line_1;
 
+String LAT, LON;
+
 int inputId = 0;
 const byte INPUT_COUNT = 2;
 String trainDataPrompts[INPUT_COUNT] = {
-  "Train Name:",
-  "Route Number:"
+  "Train ID:",
+  "Train Name:"
 };
 
 String trainDataInputs[INPUT_COUNT] = {
   "TRAIN_ID",
-  "ROUTE_ID"
+  "NAME"
 };
 
 long requestDelay = millis();
 
 void loop() {
+  webSocket.loop();
+  switch (currentState) {
+    case STATE_CONNECTING_WIFI:
+      currentState = connectToWIFI();
+      break;
 
-  if (!wifiConnected) {
-    show_error(NO_WIFI);
-    keypad_manager();
-    update_lcd();
-    return;
+    case STATE_CONNECED_WIFI:
+      currentState = STATE_SETUP;
+      break;
+
+    case STATE_NO_WIFI:
+      showError(NO_WIFI);
+      break;
+
+    case STATE_SETUP:
+      line_0 = trainDataPrompts[inputId];
+      break;
+
+    case STATE_SETUP_COMPLETED:
+      currentState = STATE_TRANSMITTING;
+      break;
+
+    case STATE_NO_GPS:
+      showError(NO_GPS);
+      break;
+
+    case STATE_TRANSMITTING:
+      line_0 = "Transmitting....";
+      if (millis() - requestDelay > REQUEST_WAIT_TIME) {
+        getLocation();
+        sendRequest();
+        requestDelay = millis();
+      }
+      break;
+
+    case STATE_IDLE:
+      line_0 = "      Idle";
+      break;
   }
 
-  if (!setupCompleted) {
-    line_0 = trainDataPrompts[inputId];
-    keypad_manager();
-    update_lcd();
-    return;
-  }
-
-  if (transmitStarted && gpsConnected) {
-    line_0 = "Transmitting....";
-    get_location();
-    send_request();
-  }
-
-  keypad_manager();
-  update_lcd();
+  keypadManager();
+  updateLCD();
 }
 
-void show_error(String err) {
+void showError(String err) {
   line_0 = "     ERROR!";
   line_1 = err;
-  update_lcd();
+  updateLCD();
 }
 
-void send_request() {
-  StaticJsonDocument<200> doc;
+void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      break;
+    case WStype_CONNECTED:
+
+      break;
+    case WStype_TEXT:
+      if (currentState == STATE_TRANSMITTING) {
+        line_1 = String((char*)payload);
+        updateLCD();
+      }
+      break;
+  }
+}
+
+void sendRequest() {
+
   doc["lat"] = LAT;
   doc["lon"] = LON;
-  doc["train"] = trainDataInputs[0];
-  doc["route"] = trainDataInputs[1];
+  doc["id"] = trainDataInputs[0];
+  doc["name"] = trainDataInputs[1];
 
   String jsonData;
   serializeJson(doc, jsonData);
-
-  HTTPClient http;
-  http.begin(wifiClient, "http://172.20.10.5:5000/update");
-  http.addHeader("Content-Type", "application/json");
-
-  int httpResponseCode = http.POST(jsonData);
-
-  if (httpResponseCode > 0) {
-    line_1 = "OK " + String(httpResponseCode);
-  } else {
-    line_1 = "ERROR " + String(httpResponseCode);
-  }
-  update_lcd();
-
-  http.end();
+  webSocket.sendTXT(jsonData);
 }
 
-void connect_to_wifi() {
+SystemState connectToWIFI() {
 
-  byte temp_count = 0;
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
+  for (int i = 0; i < WIFI_ATTEMPT_COUNT; i++) {
+    if (WiFi.status() == WL_CONNECTED) {
+      return STATE_CONNECED_WIFI;
+    }
 
-    if (temp_count % 2 == 0)
+    if (i % 2 == 0)
       lcd.print("Connecting...");
     else
       lcd.print("Connecting..");
 
     delay(1000);
     lcd.clear();
-    temp_count++;
-
-    if (temp_count > 15) {
-      wifiConnected = false;
-      return;
-    }
   }
-
-  wifiConnected = true;
+  return STATE_NO_WIFI;
 }
 
-void get_location() {
+void getLocation() {
   LAT = String(gps.location.lat(), 6);
   LON = String(gps.location.lng(), 6);
 
-  encord_gps(1000);
+  encordGPS(1000);
 
   if (millis() > 5000 && gps.charsProcessed() < 10) {
-    gpsConnected = false;
+    currentState = STATE_NO_GPS;
   }
 }
 
-void encord_gps(unsigned long ms) {
+void encordGPS(unsigned long ms) {
   unsigned long start = millis();
   do {
     while (ss.available()) {
@@ -199,7 +197,7 @@ void encord_gps(unsigned long ms) {
   } while (millis() - start < ms);
 }
 
-void init_lcd() {
+void initLCD() {
   lcd.begin(16, 2);
   lcd.init();
   lcd.backlight();
@@ -208,39 +206,25 @@ void init_lcd() {
   lcd.clear();
 }
 
-void capture_input(String input) {
+void captureInput(String input) {
 
-  if (transmitStarted) {
-    transmitStarted = false;
-    wifiConnected = false;
-    setupCompleted = false;
-    inputId = 0;
-    connect_to_wifi();
-    return;
-  }
+  switch (currentState) {
+    case STATE_SETUP:
+      if (inputId >= INPUT_COUNT) {
+        currentState = STATE_SETUP_COMPLETED;
+        inputId = 0;
+      } else {
+        trainDataInputs[inputId] = input;
+        inputId++;
+      }
+      break;
 
-  if (!setupCompleted) {
-    if (inputId > INPUT_COUNT - 1) {
-      setupCompleted = true;
-      transmitStarted = true;
-      inputId = 0;
-      return;
-    }
-    trainDataInputs[inputId] = input;
-    inputId++;
-    return;
-  }
-}
-
-void update_lcd() {
-  if (p_line_0 != line_0 || p_line_1 != line_1) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(line_0);
-    lcd.setCursor(0, 1);
-    lcd.print(line_1);
-
-    p_line_0 = line_0;
-    p_line_1 = line_1;
+    case STATE_TRANSMITTING:
+      break;
+    case STATE_CONNECTING_WIFI:
+      break;
+    case STATE_IDLE:
+      currentState = STATE_CONNECTING_WIFI;
+      break;
   }
 }
