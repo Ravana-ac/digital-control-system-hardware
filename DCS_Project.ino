@@ -16,6 +16,7 @@
 #define WIFI_SSID "Sanju's iPhone"
 #define WIFI_PASSWORD "12345678"
 #define WIFI_ATTEMPT_COUNT 10
+#define REQUEST_WAIT_TIME 4000
 
 static const int RXPin = D8, TXPin = D7;
 static const uint32_t GPSBaud = 9600;
@@ -24,7 +25,7 @@ WiFiClient wifiClient;
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 TinyGPSPlus gps;
 SoftwareSerial ss(RXPin, TXPin);
-StaticJsonDocument<200> doc;
+StaticJsonDocument<1024> doc;
 
 enum SystemState {
   STATE_CONNECTING_WIFI,
@@ -37,11 +38,6 @@ enum SystemState {
   STATE_IDLE
 };
 
-bool wifiConnected = false;
-bool setupCompleted = false;
-bool transmitStarted = false;
-bool gpsConnected = false;
-
 SystemState currentState = STATE_CONNECTING_WIFI;
 
 void setup() {
@@ -53,8 +49,6 @@ void setup() {
 
   lcd.clear();
   delay(1000);
-
-  gpsConnected = true;
 }
 
 
@@ -109,8 +103,11 @@ void loop() {
 
     case STATE_TRANSMITTING:
       line_0 = "Transmitting....";
-      getLocation();
-      sendRequest();
+      if (millis() - requestDelay > REQUEST_WAIT_TIME) {
+        getLocation();
+        sendRequest();
+        requestDelay = millis();
+      }
       break;
 
     case STATE_IDLE:
