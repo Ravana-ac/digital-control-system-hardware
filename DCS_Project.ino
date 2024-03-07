@@ -2,7 +2,6 @@
 #include <WiFiClient.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-
 #include <floatToString.h>
 #include <TinyGPSPlus.h>
 #include <SoftwareSerial.h>
@@ -16,7 +15,7 @@
 #define WIFI_SSID "Sanju's iPhone"
 #define WIFI_PASSWORD "12345678"
 #define WIFI_ATTEMPT_COUNT 10
-#define REQUEST_WAIT_TIME 1000
+#define REQUEST_WAIT_TIME 3000
 
 static const int RXPin = D8, TXPin = D7;
 static const uint32_t GPSBaud = 9600;
@@ -52,10 +51,9 @@ void setup() {
   lcd.clear();
   delay(1000);
 
-  // Setup WebSocket connection
-  webSocket.begin("172.20.10.5", 5000, "/");  // Use SSL (wss) for secure connection: webSocket.beginSSL("example.com", 443, "/");
+  webSocket.begin("172.20.10.5", 5000, "/");
   webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(5000);  // Try to reconnect every 5 seconds
+  webSocket.setReconnectInterval(5000);
 }
 
 
@@ -70,13 +68,13 @@ String LAT, LON;
 int inputId = 0;
 const byte INPUT_COUNT = 2;
 String trainDataPrompts[INPUT_COUNT] = {
-  "Train Name:",
-  "Route Number:"
+  "Train ID:",
+  "Train Name:"
 };
 
 String trainDataInputs[INPUT_COUNT] = {
   "TRAIN_ID",
-  "ROUTE_ID"
+  "NAME"
 };
 
 long requestDelay = millis();
@@ -140,7 +138,7 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 
       break;
     case WStype_TEXT:
-      if(currentState == STATE_TRANSMITTING){
+      if (currentState == STATE_TRANSMITTING) {
         line_1 = String((char*)payload);
         updateLCD();
       }
@@ -152,12 +150,12 @@ void sendRequest() {
 
   doc["lat"] = LAT;
   doc["lon"] = LON;
-  doc["route"] = trainDataInputs[1];
+  doc["id"] = trainDataInputs[0];
+  doc["name"] = trainDataInputs[1];
 
   String jsonData;
   serializeJson(doc, jsonData);
   webSocket.sendTXT(jsonData);
-
 }
 
 SystemState connectToWIFI() {
