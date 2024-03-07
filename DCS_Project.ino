@@ -1,6 +1,6 @@
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
-#include <ESP8266HTTPClient.h>
+#include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 
 #include <floatToString.h>
@@ -16,7 +16,7 @@
 #define WIFI_SSID "Sanju's iPhone"
 #define WIFI_PASSWORD "12345678"
 #define WIFI_ATTEMPT_COUNT 10
-#define REQUEST_WAIT_TIME 4000
+#define REQUEST_WAIT_TIME 1000
 
 static const int RXPin = D8, TXPin = D7;
 static const uint32_t GPSBaud = 9600;
@@ -26,6 +26,8 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 TinyGPSPlus gps;
 SoftwareSerial ss(RXPin, TXPin);
 StaticJsonDocument<1024> doc;
+
+WebSocketsClient webSocket;
 
 enum SystemState {
   STATE_CONNECTING_WIFI,
@@ -49,6 +51,11 @@ void setup() {
 
   lcd.clear();
   delay(1000);
+
+  // Setup WebSocket connection
+  webSocket.begin("172.20.10.5", 5000, "/");  // Use SSL (wss) for secure connection: webSocket.beginSSL("example.com", 443, "/");
+  webSocket.onEvent(webSocketEvent);
+  webSocket.setReconnectInterval(5000);  // Try to reconnect every 5 seconds
 }
 
 
@@ -75,7 +82,7 @@ String trainDataInputs[INPUT_COUNT] = {
 long requestDelay = millis();
 
 void loop() {
-
+  webSocket.loop();
   switch (currentState) {
     case STATE_CONNECTING_WIFI:
       currentState = connectToWIFI();
@@ -125,9 +132,23 @@ void showError(String err) {
   updateLCD();
 }
 
-void sendRequest() {
+void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      break;
+    case WStype_CONNECTED:
 
-  const String url = "http://172.20.10.5:5000/" + trainDataInputs[0];
+      break;
+    case WStype_TEXT:
+      if(currentState == STATE_TRANSMITTING){
+        line_1 = String((char*)payload);
+        updateLCD();
+      }
+      break;
+  }
+}
+
+void sendRequest() {
 
   doc["lat"] = LAT;
   doc["lon"] = LON;
@@ -135,25 +156,8 @@ void sendRequest() {
 
   String jsonData;
   serializeJson(doc, jsonData);
+  webSocket.sendTXT(jsonData);
 
-  HTTPClient http;
-  http.begin(wifiClient, url.c_str());
-  http.addHeader("Content-Type", "application/json");
-
-  int httpResponseCode = http.POST(jsonData);
-
-  if (httpResponseCode > 0) {
-    if (httpResponseCode == 404) {
-      line_1 = "Invalid Train ID";
-    } else {
-      line_1 = String(httpResponseCode);
-    }
-  } else {
-    line_1 = String(httpResponseCode) + " ERROR";
-  }
-  updateLCD();
-
-  http.end();
 }
 
 SystemState connectToWIFI() {
